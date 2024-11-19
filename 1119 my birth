@@ -1,0 +1,132 @@
+#include <MsTimer2.h>
+#include <LSM303.h>
+
+#define TEST_PIN 45
+#define SENSOR_PIN A0
+#define SI_PIN 23
+#define CLK_PIN 22
+#define NUM_PIXELS 128
+
+#define MOTOR_LEFT_EN 7
+#define MOTOR_LEFT_IN1 11
+#define MOTOR_LEFT_IN2 10
+#define MOTOR_RIGHT_IN3 9
+#define MOTOR_RIGHT_IN4 8
+#define MOTOR_RIGHT_EN 6
+
+#define DEFAULT_SPEED 100
+#define GRID_UNIT 0.4
+
+float target_angle = 90;
+float yaw_kp = 0.21;
+float yaw_kd = 0.4;
+float yaw_error = 0.0;
+float prev_yaw_error = 0.0;
+float yaw_pid_output;
+float target_yaw_angle;
+
+LSM303 accelerometer;
+
+uint8_t PixelData[NUM_PIXELS];
+uint8_t ThresholdedData[NUM_PIXELS];
+
+int SensorValues[NUM_PIXELS];
+int AdaptedSensorValues[NUM_PIXELS];
+int MaxSensorValues[NUM_PIXELS];
+int MinSensorValues[NUM_PIXELS];
+int adaptation_flag = 0;
+
+long left_encoder_pulses = 0;
+long right_encoder_pulses = 0;
+long prev_left_encoder = 0;
+long prev_right_encoder = 0;
+
+const int IMAGE_CENTER = 64;
+const int BASE_MOTOR_SPEED = 70;
+const float LINE_KP = 4.0;
+const float LINE_KD = 0.2;
+float prev_line_error = 0.0;
+
+#define ENABLE_FAST_ADC 1
+#define clear_bit(sfr, bit) (_SFR_BYTE(sfr) &= ~_BV(bit))
+#define set_bit(sfr, bit) (_SFR_BYTE(sfr) |= _BV(bit))
+
+float total_distance = 0.0;
+const float wheel_circumference = 20.0;
+const int pulses_per_rotation = 360;
+
+int task_stage = 0;
+int active_function = 0;
+
+struct Point {
+    double distance;
+    double angle;
+};
+
+Point path[20];
+int current_waypoint = 0;
+
+void setup() {
+    initialize_encoders();
+    MsTimer2::set(20, TimerISR);
+    MsTimer2::start();
+
+    for (int i = 0; i < NUM_PIXELS; i++) {
+        SensorValues[i] = 0;
+        AdaptedSensorValues[i] = 0;
+        MaxSensorValues[i] = 1023;
+        MinSensorValues[i] = 0;
+    }
+
+    pinMode(SI_PIN, OUTPUT);
+    pinMode(CLK_PIN, OUTPUT);
+    pinMode(SENSOR_PIN, INPUT);
+
+    digitalWrite(SI_PIN, LOW);
+    digitalWrite(CLK_PIN, LOW);
+
+#if ENABLE_FAST_ADC
+    set_bit(ADCSRA, ADPS2);
+    clear_bit(ADCSRA, ADPS1);
+    clear_bit(ADCSRA, ADPS0);
+#endif
+
+    pinMode(TEST_PIN, OUTPUT);
+    Serial.begin(115200);
+
+    path[0] = {0, 0};
+    path[1] = {2 * GRID_UNIT, 0};
+    path[2] = {0, 90};
+    path[3] = {3 * GRID_UNIT, 90};
+    path[4] = {0, 0};
+    path[5] = {0, -90};
+    path[6] = {1 * GRID_UNIT, -90};
+    path[7] = {0, -90};
+}
+
+void initialize_encoders() {
+    left_encoder_pulses = 0;
+    right_encoder_pulses = 0;
+    prev_left_encoder = 0;
+    prev_right_encoder = 0;
+}
+
+void TimerISR() {
+    switch (active_function) {
+        case 1:
+            trace_line();
+            break;
+        case 2:
+            control_yaw();
+            break;
+        default:
+            control_motor(0, 0);
+            break;
+    }
+}
+
+void control_motor_left(int speed) {
+    if (speed >= 0) {
+        digitalWrite(MOTOR_LEFT_IN1, LOW);
+        digitalWrite(MOTOR_LEFT_IN2, HIGH);
+        analogWrite(MOTOR_LEFT_EN, speed
